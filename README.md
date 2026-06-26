@@ -4,7 +4,7 @@ This repository contains the supplementary R project for:
 
 **L. R. Gorojovsky and B. J. Wood (2026), "Solubility and speciation of sulfur in silicate melts under crustal conditions", Earth and Planetary Science Letters.**
 
-The project provides calibration data and an R workflow for fitting LASSO regression models for sulfide and sulfate capacity in silicate melts, estimating prediction intervals, and propagating uncertainty into sulfur speciation calculations.
+The project provides calibration data and an R workflow for fitting LASSO regression models for sulfide and sulfate capacity in silicate melts, estimating prediction intervals, and propagating uncertainty into sulfur speciation calculations. Go to page: https://lauren-gorojovsky.github.io/Solubility-and-speciation-of-sulfur-under-crustal-conditions-Supplementary-materials/S2_LASSO_regression.html 
 
 ## Repository contents
 

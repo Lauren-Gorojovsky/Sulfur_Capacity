@@ -2,7 +2,7 @@ name: Render Quarto notebook
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:

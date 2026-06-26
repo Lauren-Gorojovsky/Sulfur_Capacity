@@ -1,0 +1,420 @@
+---
+title: "LASSO regression and uncertainty estimates for sulfur capacity"
+subtitle: "Supplementary notebook for Gorojovsky and Wood (2026)"
+author: "L. R. Gorojovsky"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: show
+    df-print: paged
+execute:
+  echo: true
+  warning: true
+  message: false
+---
+
+This notebook accompanies the supplementary R project for:
+
+**Gorojovsky, L. R. and Wood, B. J. (2026). Solubility and speciation of sulfur in silicate melts under crustal conditions. Earth and Planetary Science Letters.**
+
+It reproduces the LASSO regression workflow used to fit sulfide and sulfate capacity models, estimate prediction intervals, and propagate uncertainty into an example sulfur-speciation calculation. The standalone R script, `S2_LASSO_regression.R`, remains the canonical script version of the same workflow.
+
+# Setup
+
+Install the required packages before running the notebook. Most packages are available from CRAN:
+
+```{r}
+#| eval: false
+install.packages(c(
+  "readxl",
+  "glmnet",
+  "tibble",
+  "ggplot2",
+  "dplyr",
+  "patchwork",
+  "ggprism",
+  "scales"
+))
+```
+
+The `conformalInference` package is installed from GitHub:
+
+```{r}
+#| eval: false
+if (!requireNamespace("devtools", quietly = TRUE)) {
+  install.packages("devtools")
+}
+
+devtools::install_github("ryantibs/conformal", subdir = "conformalInference")
+```
+
+Load the packages used in the analysis.
+
+```{r}
+required_packages <- c(
+  "readxl",
+  "glmnet",
+  "tibble",
+  "ggplot2",
+  "dplyr",
+  "patchwork",
+  "ggprism",
+  "scales",
+  "conformalInference"
+)
+
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    "Install the following package(s) before running this notebook: ",
+    paste(missing_packages, collapse = ", ")
+  )
+}
+
+invisible(lapply(required_packages, library, character.only = TRUE))
+```
+
+# Data Import
+
+The calibration data are read from `S1_Calibration_data_and_fitting_results.xlsx`. The fitted model form is:
+
+`logCS = A0 + B/T + sum(XA/T)`
+
+```{r}
+calibration_workbook <- "S1_Calibration_data_and_fitting_results.xlsx"
+
+if (!file.exists(calibration_workbook)) {
+  stop("Could not find ", calibration_workbook, " in the project directory.")
+}
+
+df_S6 <- read_excel(
+  calibration_workbook,
+  sheet = "S2_logCS6_data_for_fitting",
+  skip = 1
+)
+
+df_S2 <- read_excel(
+  calibration_workbook,
+  sheet = "S1_logCS2_data_for_fitting",
+  skip = 1
+)
+
+tibble(
+  dataset = c("Sulfate capacity, logCS6+", "Sulfide capacity, logCS2-"),
+  rows = c(nrow(df_S6), nrow(df_S2)),
+  columns = c(ncol(df_S6), ncol(df_S2))
+)
+```
+
+Build the design matrices used by `glmnet`. The `Study` and `T` columns are excluded from the model matrices.
+
+```{r}
+x1 <- model.matrix(logCS6 ~ . - 1 - Study - T, df_S6)
+y1 <- df_S6$logCS6
+
+x2 <- model.matrix(logCS2 ~ . - 1 - Study - T, df_S2)
+y2 <- df_S2$logCS2
+
+tibble(
+  model = c("logCS6+", "logCS2-"),
+  observations = c(nrow(x1), nrow(x2)),
+  predictors = c(ncol(x1), ncol(x2))
+)
+```
+
+# Repeated Cross-Validation
+
+The models are fit with LASSO regression using `glmnet`. Repeated Monte Carlo cross-validation summarizes the selected `lambda.1se` value and the distribution of selected coefficients.
+
+The publication workflow uses `B_reps <- 100` and `nfolds <- 20`. For a quick local smoke test, reduce `B_reps`, then restore it before reproducing the supplementary results.
+
+```{r}
+set.seed(80085)
+
+B_reps <- 100
+nfolds <- 20
+
+run_mc_cv <- function(x, y, B = 100, nfolds = 20) {
+  lambda_1se_vals <- numeric(B)
+  rmse_1se_vals <- numeric(B)
+  coeff_list <- vector("list", B)
+
+  for (b in seq_len(B)) {
+    cv <- cv.glmnet(x, y, alpha = 1, nfolds = nfolds, type.measure = "mse")
+
+    lambda_1se_vals[b] <- cv$lambda.1se
+    rmse_1se_vals[b] <- sqrt(cv$cvm[cv$index["1se", 1]])
+
+    beta_1se <- coef(cv, s = "lambda.1se")
+    coeff_list[[b]] <- tibble(
+      term = beta_1se@Dimnames[[1]][beta_1se@i + 1],
+      value = beta_1se@x
+    )
+  }
+
+  coef_tbl <- bind_rows(coeff_list, .id = "iter") |>
+    group_by(term) |>
+    summarise(
+      mean = mean(value),
+      sd = sd(value),
+      n_non0 = n(),
+      .groups = "drop"
+    ) |>
+    mutate(select_freq = n_non0 / B)
+
+  list(
+    lambda_1se_mean = mean(lambda_1se_vals),
+    lambda_1se_sd = sd(lambda_1se_vals),
+    rmse_1se_mean = mean(rmse_1se_vals),
+    coef_tbl = coef_tbl
+  )
+}
+
+cv_S6 <- run_mc_cv(x1, y1, B = B_reps, nfolds = nfolds)
+cv_S2 <- run_mc_cv(x2, y2, B = B_reps, nfolds = nfolds)
+
+cv_summary <- tibble(
+  model = c("Sulfate capacity, logCS6+", "Sulfide capacity, logCS2-"),
+  lambda_1se_mean = c(cv_S6$lambda_1se_mean, cv_S2$lambda_1se_mean),
+  lambda_1se_sd = c(cv_S6$lambda_1se_sd, cv_S2$lambda_1se_sd),
+  mean_rmse = c(cv_S6$rmse_1se_mean, cv_S2$rmse_1se_mean)
+)
+
+cv_summary
+```
+
+Coefficient selection summaries from the repeated cross-validation.
+
+```{r}
+cv_S6$coef_tbl |>
+  arrange(desc(select_freq), term)
+```
+
+```{r}
+cv_S2$coef_tbl |>
+  arrange(desc(select_freq), term)
+```
+
+# Final LASSO Fits
+
+The final models are fit on all calibration data using the mean `lambda.1se` values from the repeated cross-validation.
+
+```{r}
+fit_S6 <- glmnet(x1, y1, alpha = 1, lambda = cv_S6$lambda_1se_mean)
+beta_S6 <- as.matrix(coef(fit_S6))
+beta_S6_sparse <- beta_S6[beta_S6[, 1] != 0, , drop = FALSE]
+
+fit_S2 <- glmnet(x2, y2, alpha = 1, lambda = cv_S2$lambda_1se_mean)
+beta_S2 <- as.matrix(coef(fit_S2))
+beta_S2_sparse <- beta_S2[beta_S2[, 1] != 0, , drop = FALSE]
+
+as_tibble(beta_S6_sparse, rownames = "term") |>
+  rename(coefficient = s0)
+```
+
+```{r}
+as_tibble(beta_S2_sparse, rownames = "term") |>
+  rename(coefficient = s0)
+```
+
+# Prediction Intervals
+
+Split-conformal prediction is used to estimate 95% prediction intervals with the LASSO penalty fixed from the repeated cross-validation.
+
+```{r}
+train_S6 <- function(x, y) {
+  glmnet(
+    x,
+    y,
+    alpha = 1,
+    lambda = cv_S6$lambda_1se_mean,
+    standardize = TRUE
+  )
+}
+
+predict_S6 <- function(fit, newx) {
+  as.numeric(predict(fit, newx, s = cv_S6$lambda_1se_mean))
+}
+
+conf_S6 <- conformal.pred.split(
+  x = x1,
+  y = y1,
+  x0 = x1,
+  train.fun = train_S6,
+  predict.fun = predict_S6,
+  alpha = 0.05
+)
+
+pred_S6 <- df_S6 |>
+  mutate(pred = conf_S6$pred, lo95 = conf_S6$lo, hi95 = conf_S6$up)
+```
+
+```{r}
+train_S2 <- function(x, y) {
+  glmnet(
+    x,
+    y,
+    alpha = 1,
+    lambda = cv_S2$lambda_1se_mean,
+    standardize = TRUE
+  )
+}
+
+predict_S2 <- function(fit, newx) {
+  as.numeric(predict(fit, newx, s = cv_S2$lambda_1se_mean))
+}
+
+conf_S2 <- conformal.pred.split(
+  x = x2,
+  y = y2,
+  x0 = x2,
+  train.fun = train_S2,
+  predict.fun = predict_S2,
+  alpha = 0.05
+)
+
+pred_S2 <- df_S2 |>
+  mutate(pred = conf_S2$pred, lo95 = conf_S2$lo, hi95 = conf_S2$up)
+```
+
+# Measured Versus Predicted
+
+The following plot reproduces the measured-vs-predicted comparison for the sulfide and sulfate capacity models.
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.8
+study_levels <- c("OM", "BW", "GW")
+temp_range <- c(1000, 1500)
+
+common_fill <- scale_fill_viridis_c(
+  option = "turbo",
+  name = "T (deg C)",
+  limits = temp_range,
+  breaks = seq(1050, 2100, 200),
+  oob = scales::squish
+)
+
+res_S6 <- pred_S6$logCS6 - pred_S6$pred
+rmse_S6 <- sqrt(mean(res_S6^2))
+delta_S6 <- 1.96 * rmse_S6
+
+pred_S6 <- pred_S6 |>
+  arrange(factor(Study, levels = study_levels)) |>
+  mutate(Study = factor(Study, levels = study_levels))
+
+pS6 <- ggplot(pred_S6, aes(x = logCS6, y = pred, shape = Study, fill = T - 273)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_abline(slope = 1, intercept = delta_S6, linetype = "dotted") +
+  geom_abline(slope = 1, intercept = -delta_S6, linetype = "dotted") +
+  geom_errorbar(aes(ymin = lo95, ymax = hi95), width = 0, linewidth = 0.2) +
+  geom_point(size = 2) +
+  scale_shape_manual(values = c(22, 23, 21)) +
+  common_fill +
+  labs(x = "Measured logCS6+", y = "Predicted logCS6+") +
+  coord_cartesian(clip = "off") +
+  annotation_ticks(sides = "bl", type = "both", outside = TRUE) +
+  scale_x_continuous(limits = c(2, 13), breaks = seq(2, 13, by = 2)) +
+  scale_y_continuous(limits = c(2, 13), breaks = seq(2, 13, by = 2)) +
+  theme_minimal() +
+  theme(
+    legend.key.size = unit(10, "point"),
+    aspect.ratio = 0.8,
+    panel.grid.major.y = element_line(color = "grey", linewidth = 0.3, linetype = 2),
+    panel.background = element_rect(colour = "black", fill = NA)
+  )
+
+res_S2 <- pred_S2$logCS2 - pred_S2$pred
+rmse_S2 <- sqrt(mean(res_S2^2))
+delta_S2 <- 1.96 * rmse_S2
+
+pred_S2 <- pred_S2 |>
+  arrange(factor(Study, levels = study_levels)) |>
+  mutate(Study = factor(Study, levels = study_levels))
+
+pS2 <- ggplot(pred_S2, aes(x = logCS2, y = pred, shape = Study, fill = T - 273)) +
+  geom_errorbar(aes(ymin = lo95, ymax = hi95), width = 0, linewidth = 0.2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_abline(slope = 1, intercept = delta_S2, linetype = "dotted") +
+  geom_abline(slope = 1, intercept = -delta_S2, linetype = "dotted") +
+  geom_point(size = 2) +
+  scale_shape_manual(values = c(22, 23, 21)) +
+  common_fill +
+  labs(x = "Measured logCS2-", y = "Predicted logCS2-") +
+  coord_cartesian(clip = "off") +
+  annotation_ticks(sides = "bl", type = "both", outside = TRUE) +
+  scale_x_continuous(limits = c(-8, -2), breaks = seq(-8, -2, by = 1)) +
+  scale_y_continuous(limits = c(-8, -2), breaks = seq(-8, -2, by = 1)) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    aspect.ratio = 0.8,
+    panel.grid.major.y = element_line(color = "grey", linewidth = 0.3, linetype = 2),
+    panel.background = element_rect(colour = "black", fill = NA)
+  )
+
+pS2 + pS6 + plot_layout(ncol = 2)
+```
+
+# Monte Carlo Propagation Example
+
+This section propagates uncertainty in `logCS6+`, `logCS2-`, and `logfO2` into an example `S6+/Stot` calculation. The input values below are an example and should be modified for other compositions or conditions.
+
+```{r}
+#| fig-width: 5.5
+#| fig-height: 4.5
+mu6 <- 10.824
+mu2 <- -6.226
+se6 <- 0.55 / 1.96
+se2 <- 0.35 / 1.96
+se_fO2 <- 0.01
+
+set.seed(80085)
+R <- 50000
+draw6 <- rnorm(R, mu6, se6)
+draw2 <- rnorm(R, mu2, se2)
+
+fO2_vec <- seq(-11, -5, by = 0.1)
+
+out <- lapply(fO2_vec, function(lgfO2) {
+  L_draw <- draw6 - draw2 + 2 * (lgfO2 + rnorm(1, 0, se_fO2))
+  frac <- 1 - 1 / (1 + 10^L_draw)
+
+  tibble(
+    point = 1 - 1 / (1 + 10^(mu6 - mu2 + 2 * lgfO2)),
+    lo95 = quantile(frac, 0.025),
+    hi95 = quantile(frac, 0.975)
+  )
+})
+
+grid_df <- bind_rows(out) |>
+  mutate(logfO2 = fO2_vec)
+
+ggplot(grid_df, aes(x = logfO2 - (-25096.3 / 1323 + 8.735), y = point)) +
+  geom_ribbon(aes(ymin = lo95, ymax = hi95), fill = "purple", alpha = 0.3) +
+  geom_line(linewidth = 1) +
+  coord_cartesian(clip = "off") +
+  annotation_ticks(sides = "bl", type = "both", outside = TRUE) +
+  scale_x_continuous(limits = c(-1, 4), breaks = seq(-1, 4, by = 1)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  labs(x = expression(logfO[2] * Delta * FMQ), y = "S6+ fraction") +
+  theme_minimal() +
+  theme(
+    aspect.ratio = 0.8,
+    panel.grid.major.y = element_line(color = "grey", linewidth = 0.3, linetype = 2),
+    panel.background = element_rect(colour = "black", fill = NA)
+  )
+```
+
+# Session Information
+
+Record the R and package versions used to run the notebook.
+
+```{r}
+sessionInfo()
+```

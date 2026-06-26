@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Quarto
         uses: quarto-dev/quarto-actions/setup@v2
@@ -37,6 +37,8 @@ jobs:
 
       - name: Install R packages
         shell: Rscript {0}
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           install.packages(c(
             "readxl",
@@ -50,8 +52,8 @@ jobs:
             "remotes"
           ))
 
-          remotes::install_github(
-            "ryantibs/conformal",
+          remotes::install_url(
+            "https://github.com/ryantibs/conformal/archive/refs/heads/master.tar.gz",
             subdir = "conformalInference",
             upgrade = "never"
           )
@@ -68,4 +70,4 @@ jobs:
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

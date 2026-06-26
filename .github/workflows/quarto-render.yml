@@ -52,11 +52,25 @@ jobs:
             "remotes"
           ))
 
-          remotes::install_url(
+          tarball <- tempfile(fileext = ".tar.gz")
+          download.file(
             "https://github.com/ryantibs/conformal/archive/refs/heads/master.tar.gz",
-            subdir = "conformalInference",
-            upgrade = "never"
+            tarball,
+            mode = "wb"
           )
+
+          src <- tempfile("conformal-src-")
+          dir.create(src)
+          untar(tarball, exdir = src)
+
+          root <- list.dirs(src, recursive = FALSE, full.names = TRUE)[1]
+          pkg <- file.path(root, "conformalInference")
+
+          jack <- file.path(pkg, "R", "jack.R")
+          jack_text <- readLines(jack, encoding = "latin1", warn = FALSE)
+          writeLines(jack_text, jack, useBytes = FALSE)
+
+          install.packages(pkg, repos = NULL, type = "source")
 
       - name: Render Quarto notebook
         run: |
